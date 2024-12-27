@@ -1,0 +1,11 @@
+Send 1 regular ADPOAE - expected 200
+Send 2 ADPOAE - expected rejection
+1 ADPOAE and 1 AABR ( same date and different date) - expected 200 ish might be a problem 
+
+
+r. Date - Must not be future, test for -ve and +ve dates
+
+
+7987128860
+9120123766
+

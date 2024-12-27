@@ -1,0 +1,126 @@
+pipeline {
+    agent {
+        label 'agent_hcdbuild_opcgg009100216_common01'
+    }
+    environment {
+        SONARSCANNER = 'SonarQube_Scanner_4.4'
+        SONARSERVER = 'SonarQube_HCD'
+        JAVA_HOME = "${tool 'JDK_11'}"
+        MAVEN_HOME = "${tool 'maven-3.6.2'}"
+        PATH = "$PATH:$MAVEN_HOME/bin:$JAVA_HOME/bin"
+        NEXUS_URL = "https://intra.nexus.devops.css.gov.on.ca/service/rest/v1/search/assets/download?sort=version&repository=cdis-caredove-releases&maven.groupId=ca.on.gov.cdis&maven.artifactId=caredoveapi&maven.extension=jar"
+    }
+    stages {
+        stage('Init') {
+            steps {
+                buildName '#CDIS_CAREDOVE_${BUILD_NUMBER}_${BUILD_DATE_TIME2}'
+            }
+        }
+        
+        stage('SonarQube Analysis') {
+                    environment {
+                        SCANNER_HOME = tool "${SONARSCANNER}"
+                    }
+                    steps {
+                        withSonarQubeEnv("${SONARSERVER}") {
+                            sh "mvn clean verify sonar:sonar -Dsonar.projectKey=HCD_API"
+                        }
+                    }
+                }
+
+
+
+        stage('Download and Process Version') {
+            steps {
+                script {
+                    withCredentials([usernameColonPassword(credentialsId: 'hcd_sa_nexus_basicauth_prod', variable: 'BASICAUTH')]) {
+                        sh '''
+                            # Display Maven version
+                            mvn --version
+
+                            # Download the caredoveapi.jar file using Nexus credentials
+                            curl --user "$BASICAUTH" -X GET -L "$NEXUS_URL" -H "accept: application/json" -o caredoveapi.jar
+
+                            # Create directory to store extracted pom.xml
+                            mkdir -p extracted_pom
+
+                            # Unzip pom.xml from the JAR file to extracted_pom/pom.xml
+                            unzip -p caredoveapi.jar META-INF/maven/ca.on.gov.cdis/caredoveapi/pom.xml > extracted_pom/pom.xml
+
+                            # Check if the pom.xml was successfully extracted
+                            if [ ! -f "extracted_pom/pom.xml" ]; then
+                                echo "Error: pom.xml not found in the JAR file."
+                                exit 1
+                            fi
+
+                            # Check if the version is SNAPSHOT
+                            if grep -o "\\-SNAPSHOT" extracted_pom/pom.xml; then
+                                # Extract the version without the -SNAPSHOT suffix
+                                APP_VERSION=\$(grep -oP "(?<=<version>)\\d+\\.\\d+\\.\\d+(?=-SNAPSHOT)" extracted_pom/pom.xml)
+                                releaseVersion=\$APP_VERSION
+
+                                # Replace SNAPSHOT version with release version in multiple pom files
+                                sed -i "s/<version>\$APP_VERSION-SNAPSHOT<\\/version>/<version>\$releaseVersion<\\/version>/g" extracted_pom/pom.xml
+                                sed -i "s/<version>\$APP_VERSION-SNAPSHOT<\\/version>/<version>\$releaseVersion<\\/version>/g" cdis-api-jpa/pom.xml
+                                sed -i "s/<version>\$APP_VERSION-SNAPSHOT<\\/version>/<version>\$releaseVersion<\\/version>/g" cdis-api-model/pom.xml
+                                sed -i "s/<version>\$APP_VERSION-SNAPSHOT<\\/version>/<version>\$releaseVersion<\\/version>/g" cdis-api-rs/pom.xml
+                                sed -i "s/<cdis\\.version>\$APP_VERSION-SNAPSHOT<\\/cdis\\.version>/<cdis\\.version>\$releaseVersion<\\/cdis\\.version>/g" pom.xml
+                            else
+                                # Extract the version if it's already a release version
+                                APP_VERSION=\$(grep -oP "(?<=<version>)\\d+\\.\\d+\\.\\d+" extracted_pom/pom.xml)
+                            fi
+
+                            # Output the final application version
+                            echo "Application Version: \$APP_VERSION"
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Upload') {
+            steps {
+                sh """
+                    mvn --version
+                    mvn clean deploy
+                """
+            }
+        }
+    }
+    post {
+        always {
+            script {
+                def emailRecipients = 'prosper.alabi@ontario.ca'
+
+                if (currentBuild.result == 'SUCCESS') {
+                    emailext(
+                        body: '''${SCRIPT, template="groovy-html.template"}
+                        <table class="section">
+                            <tr class="tr-title">
+                              <td class="td-title" colspan="2">SUCCESS - CONSOLE OUTPUT</td>
+                            </tr>
+                            <tr>
+                              <td colspan="2">
+                                <pre style="font-family:Calibri, Verdana, Helvetica, sans serif;font-size: 12px;color: black;">
+                                    <br/>${BUILD_LOG, maxLines=250, escapeHtml=false}
+                                </pre>
+                              </td>
+                            </tr>
+                        </table>
+                        ''',
+                        mimeType: 'text/html',
+                        subject: '${DEFAULT_SUBJECT}',
+                        to: emailRecipients
+                    )
+                } else {
+                    emailext(
+                        body: '''${SCRIPT, template="groovy-html.template"}''',
+                        mimeType: 'text/html',
+                        subject: '${DEFAULT_SUBJECT}',
+                        to: emailRecipients
+                    )
+                }
+            }
+        }
+    }
+}
